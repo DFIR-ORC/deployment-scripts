@@ -37,7 +37,7 @@ New-BitsHttpServer.ps1 [-Path] <String> [[-Site] <String>] [[-AppPool] <String>]
 
 Configure a virtual directory inside the default web site provided by IIS.
 ```powershell
-New-BitsHttpServer -Path C:\website\upload
+New-BitsHttpServer.ps1 -Path C:\website\upload
 ```
 
 ## New-BitsSmbServer.ps1
@@ -87,12 +87,12 @@ New-BitsSmbServer.ps1 [-Path] <String> [[-Mode] <String>] [[-AccountName] <Strin
 
 Create the directory D:\orc_smb_share and share it via SMB with an ACL to allow write access to "Domain Computers"
 ```powershell
-New-BitsHttpServer -Path D:\orc_smb_share
+New-BitsSmbServer.ps1 -Path D:\orc_smb_share
 ```
 
 Create the directory D:\orc_smb_share and share it via SMB with an ACL to allow write access to the local Administrator account
 ```powershell
-New-BitsHttpServer -Path D:\orc_smb_share -Mode StandaloneAuthenticated -AccountName Administrator
+New-BitsSmbServer.ps1 -Path D:\orc_smb_share -Mode StandaloneAuthenticated -AccountName Administrator
 ```
 
 ## License
