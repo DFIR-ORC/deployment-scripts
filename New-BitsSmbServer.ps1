@@ -9,7 +9,8 @@
         - StandaloneGuest (strongly discouraged): will setup the SMB share to allow guest access. Warning: this will prevent Windows 10/2016/2019 clients from accessing the share ! See https://docs.microsoft.com/en-us/troubleshoot/windows-server/networking/guest-access-in-smb2-is-disabled-by-default
         - StandaloneAuthenticated will setup the SMB share to allow an explicit local SID to access the share.
     .PARAMETER AccountName
-        Explicit users or groups to allow write access to. This parameter is passed as is to Set-SmbShareAccess so it must include the domain name if a domain account/group is desired (eg: EXAMPLE\Administrator). Required when $Mode = StandaloneAuthenticated. Defaults to "EXAMPLE\Domain Computers" when $Mode = DomainJoined and defaults to "Guest" when $Mode = StandaloneGuest. Note that even if it is possible to provide more than one user and/or group with this option, it is only possible to use one user in DFIR-ORC local configuration file.
+        Explicit users or groups to allow write access to. This parameter is passed as is to Set-SmbShareAccess so it must include the domain name if a domain account/group is desired (eg: EXAMPLE\Administrator). Required when $Mode = StandaloneAuthenticated.
+        Defaults to @("EXAMPLE\Domain Computers","EXAMPLE\Domain Controllers","NT Authority\SYSTEM") when $Mode = DomainJoined and defaults to "Guests" when $Mode = StandaloneGuest. Note that even if it is possible to provide more than one user and/or group with this option, it is only possible to use one user in DFIR-ORC local configuration file.
     .PARAMETER ShareName
         Name of the share
     .PARAMETER Audit
@@ -19,10 +20,10 @@
     .PARAMETER ShareDescription
         Description of the share
     .EXAMPLE
-        PS> New-BitsHttpServer -Path D:\orc_smb_share
+        PS> New-BitsSmbServer -Path D:\orc_smb_share
         Create the directory D:\orc_smb_share and share it via SMB with an ACL to allow write access to "Domain Computers"
     .EXAMPLE
-        PS> New-BitsHttpServer -Path D:\orc_smb_share -Mode StandaloneAuthenticated -AccountName Administrator
+        PS> New-BitsSmbServer -Path D:\orc_smb_share -Mode StandaloneAuthenticated -AccountName Administrator
         Create the directory D:\orc_smb_share and share it via SMB with an ACL to allow write access to the local Administrator account
     .NOTES
         SPDX-License-Identifier: LGPL-2.1-or-later
@@ -35,7 +36,7 @@ Param(
     [ValidateSet('DomainJoined','StandaloneGuest','StandaloneAuthenticated')]
     [String]$Mode = "DomainJoined",
 
-    [String[]]$AccountName = $null,
+    [System.Security.Principal.NTAccount[]]$AccountName = @(),
 
     [String]$ShareName = $null,
 
@@ -44,18 +45,39 @@ Param(
     [Switch]$Audit = $false
 )
 
+$EveryoneAccount = (New-Object Security.Principal.SecurityIdentifier("S-1-1-0")).Translate([Security.Principal.NTAccount])
+$SystemAccount = (New-Object Security.Principal.SecurityIdentifier("S-1-5-18")).Translate([Security.Principal.NTAccount])
+
+# Set AccountName to its default value depending on the mode of operation
 if (-not $AccountName) {
     if ($Mode -eq "DomainJoined") {
-        $DomainName = (Get-WmiObject Win32_NTDomain -Filter "DnsForestName = '$((Get-WmiObject Win32_ComputerSystem).Domain)'").DomainName
-        if ($DomainName) {
-            $AccountName = "$DomainName\Domain Computers"
+        # Default value for DomainJoined is an array of 3 items:
+        #   - Domain Computers
+        #   - Domain Controllers
+        #   - S-1-5-18 because this is the account this computer will use to access its own share
+        # In order to reliably use the first two, the script must use their SID (since their name is localized).
+        # And for that, it needs to find out the Domain SID from a known and non-localized account, in this case: krbtgt
+
+        # First, check if computer is domain-joined
+        [int] $DomainRole = Get-WmiObject Win32_ComputerSystem | Select -Expand DomainRole
+        if (($DomainRole -ne 0) -and ($DomainRole -ne 2)) {
+            # Retrieve Domain name to use for translating krbtgt account into its SID
+            $DomainName = Get-WmiObject Win32_ComputerSystem | Select -Expand Domain
+            # Extract Domain SID from krbtgt SID
+            $DomainSID = (New-Object Security.Principal.NTAccount "$DomainName\krbtgt").Translate([Security.Principal.SecurityIdentifier]) | Select -Expand AccountDomainSid
+            # Construct both Principals (Domain Computers and Domain Controllers) from Domain SID and their well known RID
+            # The translation from SecurityIdentifier to NTAccount is not strictly necessary but it helps for debug messages
+            $AccountName += (New-Object Security.Principal.SecurityIdentifier([Security.Principal.WellKnownSidType]::AccountComputersSid, $DomainSID)).Translate([Security.Principal.NTAccount])
+            $AccountName += (New-Object Security.Principal.SecurityIdentifier([Security.Principal.WellKnownSidType]::AccountControllersSid, $DomainSID)).Translate([Security.Principal.NTAccount])
+            $AccountName += $SystemAccount
         }
         else {
-            Write-Error -Exception ([System.Management.Automation.GetValueException]"Could not retrieve domain name information which is mandatory for DomainJoined mode. Is the computer really domain joined ? Is the DC reachable ?") -ErrorAction Stop
+            Write-Error -Exception ([System.Management.Automation.GetValueException]"Computer needs to be domain-joined for this mode") -ErrorAction Stop
         }
     }
     elseif ($Mode -eq "StandaloneGuest") {
-        $AccountName = "Guest"
+        # Guests group is a well known SID : S-1-5-32-546
+        $AccountName = @(New-Object Security.Principal.SecurityIdentifier("S-1-5-32-546"))
     }
     else {
         Write-Error -Exception ([System.Management.Automation.ParameterBindingException]"Parameter AccountName is required when using -Mode $Mode") -ErrorAction Stop
@@ -92,8 +114,8 @@ $Acl.AddAccessRule($(New-Object System.Security.AccessControl.FileSystemAccessRu
 # Debug: Add audit rules
 if ($Audit) {
     Write-Host "Adding full audit rule on filesystem path $SharePhysicalPath" -Foreground Cyan
-    $Acl.AddAuditRule($(New-Object System.Security.AccessControl.FileSystemAuditRule("Everyone","FullControl",[System.Security.AccessControl.AuditFlags]::Success)))
-    $Acl.AddAuditRule($(New-Object System.Security.AccessControl.FileSystemAuditRule("Everyone","FullControl",[System.Security.AccessControl.AuditFlags]::Failure)))
+    $Acl.AddAuditRule($(New-Object System.Security.AccessControl.FileSystemAuditRule($EveryoneAccount,"FullControl",[System.Security.AccessControl.AuditFlags]::Success)))
+    $Acl.AddAuditRule($(New-Object System.Security.AccessControl.FileSystemAuditRule($EveryoneAccount,"FullControl",[System.Security.AccessControl.AuditFlags]::Failure)))
 }
 # Apply ACL
 Set-Acl -Path $SharePhysicalPath -AclObject $Acl
@@ -107,7 +129,7 @@ if (Get-Command Get-SmbShare -errorAction SilentlyContinue) {
     }
     # Apply suitable SMB permissions : change for $AccountName
     Write-Host "Resetting SMB share access on $ShareName" -Foreground Cyan
-    $Share | Revoke-SmbShareAccess -AccountName "Everyone" -Force | Out-Null
+    $Share | Revoke-SmbShareAccess -AccountName $EveryoneAccount -Force | Out-Null
     $AccountName | ForEach-Object {
         $LoopAccount = $_
         Write-Host "Granting 'Change' SMB share access to account $LoopAccount on $ShareName" -Foreground Cyan
